@@ -1,25 +1,32 @@
-import logo from './logo.svg';
-import './App.css';
+import React, { useEffect, useState } from "react";
+import Ably from "ably";
+import { Realtime } from "ably/browser/static/ably-commonjs.js";
 
-function App() {
-  return (
-    <div className="App">
-      <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.js</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
-    </div>
-  );
-}
+const App = () => {
+    const [logs, setLogs] = useState([]);
+    const ably = new Realtime("YOUR_ABLY_API_KEY");
+
+    useEffect(() => {
+        const channel = ably.channels.get("logs");
+        channel.subscribe("log", (message) => {
+            setLogs((prevLogs) => [...prevLogs, message.data]);
+        });
+
+        return () => {
+            channel.unsubscribe();
+        };
+    }, [ably]);
+
+    return (
+        <div className="App">
+            <h1>Logs</h1>
+            <ul>
+                {logs.map((log, index) => (
+                    <li key={index}>{log.message}</li>
+                ))}
+            </ul>
+        </div>
+    );
+};
 
 export default App;
