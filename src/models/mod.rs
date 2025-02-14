@@ -9,7 +9,7 @@ pub struct User {
     pub email: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Post {
     pub id: u32,
     pub user_id: u32,

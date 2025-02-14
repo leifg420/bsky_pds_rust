@@ -3,14 +3,13 @@ use serde::Deserialize;
 use std::sync::Mutex;
 use rusqlite;
 use rusqlite::Connection;
-use serde_json::json;
-use serde_json::Value;
 use tokio::task;
 
 mod models;
 use models::{Post, User};
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct Log {
     id: i32,
     message: String,
@@ -28,7 +27,7 @@ struct CreateUser {
     email: String,
 }
 
-fn create_user(data: web::Data<AppState>, user: web::Json<CreateUser>) -> impl Responder {
+async fn create_user(data: web::Data<AppState>, user: web::Json<CreateUser>) -> impl Responder {
     let conn = match init_db() {
         Ok(conn) => conn,
         Err(_) => return HttpResponse::InternalServerError().json("Failed to initialize database"),
@@ -70,7 +69,7 @@ async fn create_post(data: web::Data<AppState>, post: web::Json<CreatePost>) -> 
         user_id: post.user_id,
         content: post.content.clone(),
     };
-    posts.push(new_post);
+    posts.push(new_post.clone());
 
     let log_message = serialize_post_to_log!(new_post);
 
@@ -103,7 +102,7 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Result};
 
 pub fn init_db() -> Result<Connection> {
     let conn = Connection::open("pds_server.db")?;
