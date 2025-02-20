@@ -1,52 +1,18 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder, middleware};
 use serde::Deserialize;
-use std::sync::Mutex;
-use rusqlite;
+use std::{sync::{Arc, Mutex}};
 use rusqlite::Connection;
 use tokio::task;
-
+use log::{error, info, warn};
+use simplelog::*;
+use actix_files::Files as ActixFiles;
 mod models;
 use models::{Post, User};
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct Log {
-    id: i32,
-    message: String,
-    timestamp: String,
-}
+use std::fs::File;
 
 struct AppState {
-    users: Mutex<Vec<User>>,
-    posts: Mutex<Vec<Post>>,
-}
-
-#[derive(Deserialize)]
-struct CreateUser {
-    username: String,
-    email: String,
-}
-
-async fn create_user(data: web::Data<AppState>, user: web::Json<CreateUser>) -> impl Responder {
-    let conn = match init_db() {
-        Ok(conn) => conn,
-        Err(_) => return HttpResponse::InternalServerError().json("Failed to initialize database"),
-    };
-
-    let mut users = data.users.lock().unwrap();
-    let id = users.len() as u32 + 1;
-    let new_user = User {
-        id,
-        username: user.username.clone(),
-        email: user.email.clone(),
-    };
-    users.push(new_user);
-
-    if let Err(_) = insert_user(&conn, &user.username, &user.email) {
-        return HttpResponse::InternalServerError().json("Failed to insert user into database");
-    }
-
-    HttpResponse::Ok().json("User created")
+    users: Arc<Mutex<Vec<User>>>,
+    posts: Arc<Mutex<Vec<Post>>>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +25,25 @@ macro_rules! serialize_post_to_log {
     ($post:expr) => {
         format!("User {} created a post: {}", $post.user_id, $post.content)
     };
+}
+fn init_db() -> rusqlite::Result<Connection> {
+    let conn = Connection::open("app.db")?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY,
+            message TEXT NOT NULL
+        )",
+        [],
+    )?;
+    Ok(conn)
+}
+
+fn create_log(conn: &Connection, message: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO logs (message) VALUES (?1)",
+        &[message],
+    )?;
+    Ok(())
 }
 
 async fn create_post(data: web::Data<AppState>, post: web::Json<CreatePost>) -> impl Responder {
@@ -73,87 +58,63 @@ async fn create_post(data: web::Data<AppState>, post: web::Json<CreatePost>) -> 
 
     let log_message = serialize_post_to_log!(new_post);
 
+    let log_message_clone = log_message.clone(); // Clone log_message to ensure it is Send
+
     if let Err(e) = task::spawn_blocking(move || {
         let conn = init_db().expect("Failed to initialize database");
-        create_log(&conn, &log_message)
+        create_log(&conn, &log_message_clone)
     }).await.expect("Failed to run blocking task")
     {
-        eprintln!("Failed to insert log into database: {:?}", e);
+        error!("Failed to insert log into database: {:?}", e);
     }
 
     HttpResponse::Ok().json("Post created")
 }
 
+async fn not_found() -> impl Responder {
+    HttpResponse::NotFound().json("404 Not Found")
+}
+
+async fn internal_server_error() -> impl Responder {
+    HttpResponse::InternalServerError().json("500 Internal Server Error")
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    TermLogger::init(LevelFilter::Debug, Config::default(), TerminalMode::Mixed, ColorChoice::Auto).unwrap();
+    WriteLogger::init(LevelFilter::Debug, Config::default(), File::create("app.log").unwrap()).unwrap();
+
     let data = web::Data::new(AppState {
-        users: Mutex::new(vec![]),
-        posts: Mutex::new(vec![]),
+        users: Arc::new(Mutex::new(vec![])),
+        posts: Arc::new(Mutex::new(vec![])),
     });
 
     HttpServer::new(move || {
         App::new()
             .app_data(data.clone())
+            .wrap(middleware::Logger::default())
+            .wrap(middleware::ErrorHandlers::new()
+                .handler(actix_web::http::StatusCode::NOT_FOUND, |res| {
+                    Box::pin(async move {
+                        let response = res.into_response(not_found().await.respond_to(&res).map_into_boxed_body());
+                        Ok(actix_web::middleware::ErrorHandlerResponse::Response(response))
+                    })
+                })
+                .handler(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR, |res| {
+                    Box::pin(async move {
+                        let response = res.into_response(internal_server_error().await);
+                        Ok(actix_web::middleware::ErrorHandlerResponse::Response(response))
+                    })
+                })
+            )
             .route("/users", web::post().to(create_user))
             .route("/posts", web::post().to(create_post))
+            .service(ActixFiles::new("/", "./static").index_file("index.html").default_handler(|req| {
+                let response = req.into_response(not_found());
+                Ok(response)
+            }))
     })
     .bind("127.0.0.1:8080")?
     .run()
     .await
-}
-
-use rusqlite::{params, Result};
-
-pub fn init_db() -> Result<Connection> {
-    let conn = Connection::open("pds_server.db")?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS user (
-            id INTEGER PRIMARY KEY,
-            username TEXT NOT NULL,
-            email TEXT NOT NULL
-        )",
-        params![],
-    )?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS log (
-            id INTEGER PRIMARY KEY,
-            message TEXT NOT NULL,
-            timestamp TEXT NOT NULL
-        )",
-        params![],
-    )?;
-    Ok(conn)
-}
-
-pub fn insert_user(conn: &Connection, username: &str, email: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO user (username, email) VALUES (?1, ?2)",
-        params![username, email],
-    )?;
-    Ok(())
-}
-
-pub fn create_log(conn: &Connection, message: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO log (message, timestamp) VALUES (?1, datetime('now'))",
-        params![message],
-    )?;
-    Ok(())
-}
-
-pub fn get_logs(conn: &Connection) -> Result<Vec<Log>> {
-    let mut stmt = conn.prepare("SELECT id, message, timestamp FROM log")?;
-    let log_iter = stmt.query_map(params![], |row| {
-        Ok(Log {
-            id: row.get(0)?,
-            message: row.get(1)?,
-            timestamp: row.get(2)?,
-        })
-    })?;
-
-    let mut logs = Vec::new();
-    for log in log_iter {
-        logs.push(log?);
-    }
-    Ok(logs)
 }
